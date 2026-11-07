@@ -71,7 +71,24 @@ The inner world is lit by its own moon at its centre. Through the portal its cen
 
 `node tests/core.test.cjs` checks the CPU reference in `core.js`:
 
-LEDGER_TABLE
+(12/12 pass, about 6 minutes)
+
+| test | result |
+|---|---|
+| T1 one law per level, same every visit; explicit step inside the stability bound for both fields | worst dt·\|op\| over 60 levels = 1.50 < 2 |
+| T2 strongest growth, feedback and light: bounded, no NaN | max \|ψ\|, \|φ\| = 1.81 |
+| T3 the fine lattice grows inside the coarse body and nowhere else | in 55% of voxels where ψ > 0.4, 1% where ψ < 0, 0% in the far sea |
+| T4 each Mexican hat picks its own wavelength | ψ peaks at \|m\| = n/λc = 4, φ at n/λf = 8, exactly |
+| T5 the lattice feeds back on the body | rms body amplitude 0.633 / 0.735 / 0.839 at k_fb = −0.4 / 0 / +0.4 |
+| T6 straight moonlight: a crystal ball casts a shadow | light behind 0.004, beside 0.53, between ball and moon 0.99 |
+| T7 light is a growth term: same ε (−0.2), lit half crystallises, shadowed half stays empty | 42% vs 0% |
+| T8 portal Φ: involution, \|Φx−c\|·\|x−c\| = R², conformal, half-turn on the moon; Φ∘I = 2c − x, exact on voxels | all errors < 2e-13; voxel mirror exact |
+| T9 the membrane: an island touching the moon grows its continuation in the inner world at 2c − x, and only there | inner \|ψ\| > 0.1 at the mirror site: 37% glued, 0% unglued; mean \|Ψ_in − Ψ_out(2c−x)\| at the membrane 0.033 |
+| T10 camera brightness gates both fields | crystal on the bright half 97%, dark half 0%; fine lattice in the bright half 70% |
+| T11 motion drives | 100% crystal in the moving patch, 0% elsewhere |
+| T12 photons: a crystal rod that casts a shadow in straight light becomes a light guide when light bends (κ = 0.8) | light inside the rod 24 voxels out: straight 0.058, bent 3.0 (the cap); 5 voxels beside it: 0.25 → 0.10 |
+
+T12 is the waveguide in its simplest form: the same rod, the same light, and the only change is whether the light bends. Bending turns its shadow into the brightest place in the world, and takes the light from beside it.
 
 **The GPU matches the CPU.** Open `index.html?selftest` and the page steps both fields on the GPU and in `core.js` from the same start, for 25 steps, with the light term, the membrane, the nucleation noise and the camera all on. The noise is an integer hash written identically in JS and GLSL, so it is part of the comparison, not switched off for it.
 
