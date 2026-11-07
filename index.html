@@ -135,7 +135,7 @@ const gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer
 if (!gl) fail('Crystal Moon needs WebGL2.');
 if (!gl.getExtension('EXT_color_buffer_float')) fail('Crystal Moon needs float render targets (EXT_color_buffer_float).');
 
-const N = 64, TILES = 8, AT = N * TILES, GT = N + 2, GAT = GT * TILES; // sim atlas 512², view atlas 528² (1-texel gutter)
+const N = 64, TILES = 8, AT = N * TILES; // sim atlas 512² (8 × 8 tiles of 64²); the view fields are 64³ 3D textures
 
 // ================================================================== shaders
 const VS = `#version 300 es
@@ -145,7 +145,6 @@ const SIM_COMMON = `#version 300 es
 precision highp float; precision highp int; precision highp sampler2D;
 uniform sampler2D uSrc;
 ivec2 texOf(ivec3 p){ p = (p % 64 + 64) % 64; return ivec2(p.x + (p.z & 7) * 64, p.y + (p.z >> 3) * 64); }
-ivec2 gutOf(ivec3 p){ p = (p % 64 + 64) % 64; return ivec2((p.z & 7) * 66 + p.x + 1, (p.z >> 3) * 66 + p.y + 1); }
 ivec3 voxOf(ivec2 t){ return ivec3(t.x & 63, t.y & 63, (t.x >> 6) + (t.y >> 6) * 8); }
 vec4 at(ivec3 p){ return texelFetch(uSrc, texOf(p), 0); }
 float wrap1(float d){ d = mod(abs(d), 64.0); return min(d, 64.0 - d); }
@@ -154,14 +153,9 @@ float hash(vec3 p, float s){ p = fract(p * 0.1031 + s * 0.0137); p += dot(p, p.y
 // the integer hash of core.js (mix / noiseU), bit for bit
 uint hmix(uint x){ x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u; return x; }
 float noiseU(int i, int frame, int ch){ return float(hmix((uint(i) * 0x9e3779b1u) ^ hmix(uint(frame) * 7919u + uint(ch) * 104729u + 1u))) / 4294967296.0; }
-// trilinear read of a view atlas (528², 1-texel gutter), world position p (voxel k sits at k + 0.5)
-vec4 sampleV(sampler2D s, vec3 p){
-  p = mod(p, 64.0);
-  float zf = p.z - 0.5, z0 = floor(zf), f = zf - z0;
-  float za = mod(z0, 64.0), zb = mod(z0 + 1.0, 64.0);
-  vec2 ta = vec2(mod(za, 8.0), floor(za / 8.0)) * 66.0, tb = vec2(mod(zb, 8.0), floor(zb / 8.0)) * 66.0;
-  return mix(texture(s, (ta + p.xy + 1.0) / 528.0), texture(s, (tb + p.xy + 1.0) / 528.0), f);
-}
+// the view fields are 64³ 3D textures with REPEAT wrap: hardware trilinear, periodic, one fetch (voxel k sits at k + 0.5)
+precision highp sampler3D;
+vec4 sample3(sampler3D s, vec3 p){ return texture(s, p / 64.0); }
 `;
 
 // pass 1 (two targets): a copy of the state (ψ, φ, age, trail) and the Laplacians (∇²ψ, ∇²φ)
@@ -206,7 +200,7 @@ vec3 camPlace(vec3 x){
 
 // pass 2: both fields, the light, the membrane, the camera  (identical to Field.step in core.js)
 const FS_UPDATE = SIM_COMMON + CAM_GLSL + `
-uniform sampler2D uB, uOther, uLT;
+uniform sampler2D uB, uOther; uniform sampler3D uLT;
 uniform float uDt, uQc2, uQf2, uGc, uGf, uT, uEpsSea, uEpsIsl, uEpsSeaF, uEpsF, uSkin0, uSkin1, uKfb, uKL, uGlue, uNoise, uMoonR;
 uniform vec3 uMoonC;
 uniform sampler2D uEps, uEpsO;            // per-voxel (ε of the islands, island mask), written once per level
@@ -247,7 +241,7 @@ void main(){
       camF = cp.x * uCamGain; eF0 = uEpsSeaF + (uEpsF + 0.1 - uEpsSeaF) * bd.x;
     }
   }
-  float light = texelFetch(uLT, gutOf(p), 0).r;
+  float light = texelFetch(uLT, p, 0).r;
   float ec = e0 + trail + md + uKfb * phi * phi + uKL * (light - 0.25) * mk;
   float ef = uEpsSeaF + (uEpsF - uEpsSeaF) * smoothstep(uSkin0, uSkin1, psi);
   if (camF > 0.0) ef += (eF0 - ef) * camF + md;
@@ -309,9 +303,9 @@ void main(){
   o = vec4(s, 0.0, 0.0, 0.0);
 }`;
 
-// view atlas (gutter): (Ψ, age, ρ, camera glass) and (∇ρ, moonlight)
+// view fields, one z layer per draw: (Ψ, age, ρ, camera glass) and (∇ρ, moonlight)
 const FS_VIEW = SIM_COMMON + CAM_GLSL + `
-uniform sampler2D uRho, uLT; uniform float uBeta;
+uniform sampler2D uRho; uniform sampler3D uLT; uniform float uBeta; uniform int uZ;
 layout(location = 0) out vec4 o0;
 layout(location = 1) out vec4 o1;
 float camL(ivec3 p){
@@ -321,32 +315,28 @@ float camL(ivec3 p){
 }
 float rho(ivec3 p){ return texelFetch(uRho, texOf(p), 0).r + camL(p); }
 void main(){
-  ivec2 t = ivec2(gl_FragCoord.xy);
-  ivec2 tile = t / 66, loc = t - tile * 66 - 1;
-  ivec3 p = ivec3(loc.x, loc.y, tile.x + tile.y * 8);
+  ivec3 p = ivec3(ivec2(gl_FragCoord.xy), uZ);
   vec4 s = at(p);
   vec3 g = 0.5 * vec3(rho(p + ivec3(1,0,0)) - rho(p - ivec3(1,0,0)),
                       rho(p + ivec3(0,1,0)) - rho(p - ivec3(0,1,0)),
                       rho(p + ivec3(0,0,1)) - rho(p - ivec3(0,0,1)));
   o0 = vec4(s.r + uBeta * s.g, s.b, rho(p), camL(p));
-  o1 = vec4(g, texelFetch(uLT, t, 0).r);
+  o1 = vec4(g, texelFetch(uLT, p, 0).r);
 }`;
 
 // moonlight: transmittance of the straight line from each voxel to the moon through the visible crystal
 // (identical in form to lightAt in core.js; written in the same gutter layout as the view atlas)
 const FS_LIGHT = SIM_COMMON + `
-uniform sampler2D uV; uniform float uIso, uPol, uMoonR; uniform vec3 uMoonC;
+uniform sampler3D uV; uniform float uIso, uPol, uMoonR; uniform vec3 uMoonC; uniform int uZ;
 out vec4 o;
 void main(){
-  ivec2 t = ivec2(gl_FragCoord.xy);
-  ivec2 tile = t / 66, loc = t - tile * 66 - 1;
-  ivec3 p = (ivec3(loc.x, loc.y, tile.x + tile.y * 8) % 64 + 64) % 64;
+  ivec3 p = ivec3(ivec2(gl_FragCoord.xy), uZ);
   vec3 X = vec3(p) + 0.5, v = uMoonC + 0.5 - X;
   float d = length(v);
   if (d < uMoonR - 0.5) { o = vec4(0.0); return; }
   vec3 u = v / d;
   float s = max(d - uMoonR - 0.5, 0.0) / 24.0, acc = 0.0;
-  for (int i = 0; i < 24; i++) acc += smoothstep(0.6 * uIso, 1.2 * uIso, uPol * sampleV(uV, X + u * s * (float(i) + 0.5)).x) * s;
+  for (int i = 0; i < 24; i++) acc += smoothstep(0.6 * uIso, 1.2 * uIso, uPol * sample3(uV, X + u * s * (float(i) + 0.5)).x) * s;
   float r = (d - uMoonR) / 18.0;
   o = vec4(exp(-0.7 * acc) / (1.0 + r * r), 0.0, 0.0, 0.0);
 }`;
@@ -359,14 +349,14 @@ layout(location = 0) out vec4 o0;
 layout(location = 1) out vec4 o1;
 void main(){
   ivec2 t = ivec2(gl_FragCoord.xy);
-  float k = float(t.y * 256 + t.x);
-  float z = 1.0 - 2.0 * (k + 0.5) / 65536.0, ph = 6.283185307 * fract(k * 0.3819660112501051), s = sqrt(max(0.0, 1.0 - z * z));
+  float k = float(t.y * 128 + t.x);
+  float z = 1.0 - 2.0 * (k + 0.5) / 16384.0, ph = 6.283185307 * fract(k * 0.3819660112501051), s = sqrt(max(0.0, 1.0 - z * z));
   vec3 d = uRot * vec3(s * cos(ph), s * sin(ph), z);
   o0 = vec4(uMoonC + 0.5 + d * (uMoonR + 0.6), 1.0);
   o1 = vec4(d, 0.0);
 }`;
 const FS_PH_STEP = SIM_COMMON + `
-uniform sampler2D uPh, uPd, uV1, uV2; uniform float uIso, uPol, uKappa, uH, uSigma, uMoonR, uMaxR; uniform vec3 uMoonC;
+uniform sampler2D uPh, uPd; uniform sampler3D uV1, uV2; uniform float uIso, uPol, uKappa, uH, uSigma, uMoonR, uMaxR; uniform vec3 uMoonC;
 layout(location = 0) out vec4 o0;
 layout(location = 1) out vec4 o1;
 void main(){
@@ -375,13 +365,13 @@ void main(){
   vec3 d = texelFetch(uPd, t, 0).xyz, x = P.xyz;
   float w = P.w;
   if (w > 0.0) {
-    float r0 = sampleV(uV1, x).z;
-    vec3 g = uKappa * sampleV(uV2, x).xyz;
+    float r0 = sample3(uV1, x).z;
+    vec3 g = uKappa * sample3(uV2, x).xyz;
     d = normalize(d + uH * (g - dot(g, d) * d) / (1.0 + uKappa * r0));
     x += d * uH;
     float r = length(x - uMoonC - 0.5);
     if (r < uMoonR || r > uMaxR) w = 0.0;
-    else w *= exp(-uSigma * smoothstep(0.6 * uIso, 1.2 * uIso, uPol * sampleV(uV1, x).x) * uH);
+    else w *= exp(-uSigma * smoothstep(0.6 * uIso, 1.2 * uIso, uPol * sample3(uV1, x).x) * uH);
     if (w < 0.01) w = 0.0;
   }
   o0 = vec4(x, w);
@@ -393,7 +383,7 @@ uniform sampler2D uPh; uniform float uH;
 out float vW;
 void main(){
   int k = gl_VertexID;
-  vec4 P = texelFetch(uPh, ivec2(k & 255, k >> 8), 0);
+  vec4 P = texelFetch(uPh, ivec2(k & 127, k >> 7), 0);
   vW = P.w * uH;
   ivec3 p = min(ivec3(floor(mod(P.xyz, 64.0))), ivec3(63));
   vec2 a = vec2(float(p.x + (p.z & 7) * 64), float(p.y + (p.z >> 3) * 64)) + 0.5;
@@ -404,14 +394,12 @@ const FS_DEPOSIT = `#version 300 es
 precision highp float;
 in float vW; out vec4 o;
 void main(){ o = vec4(vW, 0.0, 0.0, 0.0); }`;
-// fluence → light, written into the gutter layout; blended into the old light (temporal average)
+// fluence → light, one z layer per draw; blended into the old light (temporal average)
 const FS_PH_RESOLVE = SIM_COMMON + `
-uniform float uNorm, uMoonR, uCap; uniform vec3 uMoonC;
+uniform float uNorm, uMoonR, uCap; uniform vec3 uMoonC; uniform int uZ;
 out vec4 o;
 void main(){
-  ivec2 t = ivec2(gl_FragCoord.xy);
-  ivec2 tile = t / 66, loc = t - tile * 66 - 1;
-  ivec3 p = (ivec3(loc.x, loc.y, tile.x + tile.y * 8) % 64 + 64) % 64;
+  ivec3 p = ivec3(ivec2(gl_FragCoord.xy), uZ);
   float f = 0.5 * at(p).r + (at(p + ivec3(1,0,0)).r + at(p - ivec3(1,0,0)).r + at(p + ivec3(0,1,0)).r
           + at(p - ivec3(0,1,0)).r + at(p + ivec3(0,0,1)).r + at(p - ivec3(0,0,1)).r) / 12.0;
   float d = length(vec3(p) - uMoonC);
@@ -430,8 +418,8 @@ void main(){
 
 // ---------------------------------------------------------------- the renderer
 const FS_RENDER = `#version 300 es
-precision highp float; precision highp sampler2D;
-uniform sampler2D uV1, uV2, uW1, uW2;
+precision highp float; precision highp sampler2D; precision highp sampler3D;
+uniform sampler3D uV1, uV2, uW1, uW2;
 uniform vec2 uRes; uniform vec3 uCam; uniform mat3 uRot; uniform float uFov, uTime;
 uniform float uIso, uPol, uKappa, uHue, uAmp;
 uniform float uIsoIn, uPolIn, uHueIn, uAmpIn;
@@ -441,13 +429,7 @@ uniform sampler2D uVid; uniform float uCamSky, uVidAspect;
 uniform float uGlass, uShaft;
 out vec4 frag;
 
-vec4 sampleV(sampler2D s, vec3 p){
-  p = mod(p, 64.0);
-  float zf = p.z - 0.5, z0 = floor(zf), f = zf - z0;
-  float za = mod(z0, 64.0), zb = mod(z0 + 1.0, 64.0);
-  vec2 ta = vec2(mod(za, 8.0), floor(za / 8.0)) * 66.0, tb = vec2(mod(zb, 8.0), floor(zb / 8.0)) * 66.0;
-  return mix(texture(s, (ta + p.xy + 1.0) / 528.0), texture(s, (tb + p.xy + 1.0) / 528.0), f);
-}
+vec4 sampleV(sampler3D s, vec3 p){ return texture(s, p / 64.0); }
 vec3 hsv(float h, float s, float v){ vec3 k = clamp(abs(mod(h * 6.0 + vec3(0, 4, 2), 6.0) - 3.0) - 1.0, 0.0, 1.0); return v * mix(vec3(1), k, s); }
 vec3 h33(vec3 p){ p = fract(p * vec3(.1031, .1030, .0973)); p += dot(p, p.yxz + 33.33); return fract((p.xxy + p.yxx) * p.zyx); }
 // only the one real moon lights the world: the periodic copies of the field far away get no light
@@ -478,7 +460,7 @@ vec3 sky(vec3 d, float hue){
   vec3 b = skyBase(d, hue);
   return uCamSky > 0.0 ? mix(b, camEnv(d, hue), uCamSky) : b;
 }
-vec3 normalAt(sampler2D s, vec3 p, float pol){
+vec3 normalAt(sampler3D s, vec3 p, float pol){
   const float e = 0.5;
   vec3 g = vec3(sampleV(s, p + vec3(e,0,0)).x - sampleV(s, p - vec3(e,0,0)).x,
                 sampleV(s, p + vec3(0,e,0)).x - sampleV(s, p - vec3(0,e,0)).x,
@@ -631,12 +613,12 @@ void main(){
       float ph = pow(max(dot(d, -mr / md), 0.0), 6.0);
       glow += mcol * a2.w * cellFade(p) * (1.0 - gk) * h * uShaft * (0.0007 + 0.02 * ph) * att;
     }
-    h = mix(0.35, 2.2, 1.0 - smoothstep(0.004, 0.06, a.z));
+    h = mix(0.35, 2.2, 1.0 - smoothstep(0.004, 0.06, a.z)) * (1.0 + t * 0.012);   // stride grows with distance (fog hides it)
     h = min(h, max(0.25, md - uMoonR + 0.15));
     vec3 gr = uKappa * a2.xyz;
     d = normalize(d + h * (gr - dot(gr, d) * d) / (1.0 + uKappa * a.z));
     p += d * h; t += h;
-    if (t > 150.0) break;
+    if (t > 125.0) break;
   }
   if (!hit) col = sky(d, uHue);
   col += glow;
@@ -673,7 +655,30 @@ function tex(w, h, internal, format, type, filter) {
   return t;
 }
 const simTex = () => tex(AT, AT, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST);
-const viewTex = () => tex(GAT, GAT, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
+/** A 64³ view field: half floats, hardware trilinear, REPEAT on all three axes (the world is periodic). */
+function viewTex() {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_3D, t);
+  gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA16F, N, N, N, 0, gl.RGBA, gl.HALF_FLOAT, null);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, p, gl.REPEAT);
+  t.is3d = true; t.w = N; t.h = N;
+  return t;
+}
+/** One framebuffer per z layer of the given 3D textures (drawn one layer at a time). */
+function layers(...texs) {
+  const out = [];
+  for (let z = 0; z < N; z++) {
+    const f = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+    texs.forEach((t, i) => gl.framebufferTextureLayer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, t, 0, z));
+    f.n = texs.length; f.w = N; f.h = N;
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) fail('layer framebuffer incomplete');
+    out.push(f);
+  }
+  return out;
+}
 function fbo(...texs) {
   const f = gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER, f);
@@ -695,7 +700,7 @@ function run(prog, target, uni = {}, texs = {}, points = 0) {
   }
   let unit = 0;
   for (const [name, t] of Object.entries(texs)) {
-    gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(t.is3d ? gl.TEXTURE_3D : gl.TEXTURE_2D, t);
     gl.uniform1i(loc(prog, name), unit++);
   }
   for (const [name, v] of Object.entries(uni)) {
@@ -718,7 +723,7 @@ const P = {
   phEmit: program(FS_PH_EMIT), phStep: program(FS_PH_STEP), deposit: program(FS_DEPOSIT, VS_DEPOSIT), resolve: program(FS_PH_RESOLVE), reduce: program(FS_REDUCE), render: program(FS_RENDER),
 };
 const T1 = simTex(), T2 = simTex(), fT1 = fbo(T1), fT2 = fbo(T2);
-const phT = () => tex(256, 256, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST);
+const phT = () => tex(128, 128, gl.RGBA32F, gl.RGBA, gl.FLOAT, gl.NEAREST);
 const PH = [{ P: phT(), D: phT() }, { P: phT(), D: phT() }];
 PH.forEach((b) => { b.f = fbo(b.P, b.D); });
 const ACC = tex(AT, AT, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.NEAREST), fACC = fbo(ACC);
@@ -740,7 +745,7 @@ const redBuf = new Float32Array(N * N * 4);
 // ================================================================== worlds
 function makeWorld(level) {
   const w = { S: simTex(), A: simTex(), B: simTex(), E: simTex(), V1: viewTex(), V2: viewTex(), LT: viewTex(), amp: 0.5, frame: 0 };
-  w.fS = fbo(w.S); w.fA = fbo(w.A); w.fAB = fbo(w.A, w.B); w.fE = fbo(w.E); w.fV = fbo(w.V1, w.V2); w.fLT = fbo(w.LT);
+  w.fS = fbo(w.S); w.fA = fbo(w.A); w.fAB = fbo(w.A, w.B); w.fE = fbo(w.E); w.fV = layers(w.V1, w.V2); w.fLT = layers(w.LT);
   setLaw(w, level);
   return w;
 }
@@ -782,11 +787,13 @@ function viewWorld(w, camMode = 0) {
   run(P.blur, fT1, { uDir: { int: [1, 0, 0] }, uMode: { int: 0 }, uBeta: b }, { uSrc: w.S });
   run(P.blur, fT2, { uDir: { int: [0, 1, 0] }, uMode: { int: 1 } }, { uSrc: T1 });
   run(P.blur, fT1, { uDir: { int: [0, 0, 1] }, uMode: { int: 1 } }, { uSrc: T2 });
-  run(P.view, w.fV, { ...camUniforms(camMode), uBeta: b }, { uSrc: w.S, uRho: T1, uCam: CAMTEX, uLT: w.LT });
+  const u = { ...camUniforms(camMode), uBeta: b }, t = { uSrc: w.S, uRho: T1, uCam: CAMTEX, uLT: w.LT };
+  for (let z = 0; z < N; z++) { u.uZ = { int: z }; run(P.view, w.fV[z], u, t); }
 }
 const isoOf = (w) => Math.abs(w.law.isoFrac) * Math.max(w.amp, 0.45);
 function lightWorld(w) {
-  run(P.light, w.fLT, { uIso: isoOf(w), uPol: Math.sign(w.law.isoFrac), uMoonR: CM.MOON.R, uMoonC: CM.MOON.c }, { uV: w.V1 });
+  const u = { uIso: isoOf(w), uPol: Math.sign(w.law.isoFrac), uMoonR: CM.MOON.R, uMoonC: CM.MOON.c };
+  for (let z = 0; z < N; z++) { u.uZ = { int: z }; run(P.light, w.fLT[z], u, { uV: w.V1 }); }
 }
 function randRot() {
   let q = [Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5];
@@ -796,24 +803,33 @@ function randRot() {
     2 * (x * y - s * z), 1 - 2 * (x * x + z * z), 2 * (y * z + s * x),
     2 * (x * z + s * y), 2 * (y * z - s * x), 1 - 2 * (x * x + y * y)];
 }
-/** Bent moonlight: 65 536 photons from the moon through the lens, deposited into the voxels they cross. */
-function photonWorld(w, blend = 0.35) {
-  const C = CM.PHOTON, iso = isoOf(w), pol = Math.sign(w.law.isoFrac);
+/** Bent moonlight: 16 384 photons from the moon through the lens, deposited into the voxels they cross.
+ *  One trace is spread over several frames (photonTick), so no single frame pays for all 48 steps. */
+let job = null, jobTurn = 0;
+function photonStart(w, blend) {
+  const C = CM.PHOTON;
   gl.bindFramebuffer(gl.FRAMEBUFFER, fACC); gl.viewport(0, 0, AT, AT); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
   run(P.phEmit, PH[0].f, { uRot: { mat3: randRot() }, uMoonR: CM.MOON.R, uMoonC: CM.MOON.c });
-  let cur = 0;
-  const su = { uIso: iso, uPol: pol, uKappa: w.law.kappa, uH: C.h, uSigma: C.sigma, uMoonR: CM.MOON.R, uMaxR: C.maxR, uMoonC: CM.MOON.c };
-  for (let s = 0; s < C.steps; s++) {
-    run(P.phStep, PH[1 - cur].f, su, { uPh: PH[cur].P, uPd: PH[cur].D, uV1: w.V1, uV2: w.V2 });
-    cur = 1 - cur;
+  job = { w, blend, cur: 0, s: 0,
+    su: { uIso: isoOf(w), uPol: Math.sign(w.law.isoFrac), uKappa: w.law.kappa, uH: C.h, uSigma: C.sigma, uMoonR: CM.MOON.R, uMaxR: C.maxR, uMoonC: CM.MOON.c } };
+}
+function photonTick(n) {
+  const C = CM.PHOTON;
+  for (let k = 0; k < n && job.s < C.steps; k++, job.s++) {
+    run(P.phStep, PH[1 - job.cur].f, job.su, { uPh: PH[job.cur].P, uPd: PH[job.cur].D, uV1: job.w.V1, uV2: job.w.V2 });
+    job.cur = 1 - job.cur;
     gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
-    run(P.deposit, fACC, { uH: C.h }, { uPh: PH[cur].P }, C.K);
+    run(P.deposit, fACC, { uH: C.h }, { uPh: PH[job.cur].P }, C.K);
     gl.disable(gl.BLEND);
   }
-  gl.enable(gl.BLEND); gl.blendColor(0, 0, 0, blend); gl.blendFunc(gl.CONSTANT_ALPHA, gl.ONE_MINUS_CONSTANT_ALPHA);
-  run(P.resolve, w.fLT, { uNorm: 4 * Math.PI * (CM.MOON.R + 2) ** 2 / C.K, uMoonR: CM.MOON.R, uCap: C.cap, uMoonC: CM.MOON.c }, { uSrc: ACC });
+  if (job.s < C.steps) return;
+  gl.enable(gl.BLEND); gl.blendColor(0, 0, 0, job.blend); gl.blendFunc(gl.CONSTANT_ALPHA, gl.ONE_MINUS_CONSTANT_ALPHA);
+  const u = { uNorm: 4 * Math.PI * (CM.MOON.R + 2) ** 2 / C.K, uMoonR: CM.MOON.R, uCap: C.cap, uMoonC: CM.MOON.c };
+  for (let z = 0; z < N; z++) { u.uZ = { int: z }; run(P.resolve, job.w.fLT[z], u, { uSrc: ACC }); }
   gl.disable(gl.BLEND);
+  job = null;
 }
+function photonWorld(w, blend) { photonStart(w, blend); photonTick(CM.PHOTON.steps); }
 function shine(w, blend) { if (cfg.bent) photonWorld(w, blend); else lightWorld(w); }
 function measureAmp(w) {
   run(P.reduce, fRED, { uBeta: w.law.beta }, { uSrc: w.S });
@@ -1043,9 +1059,15 @@ function simulate(dt, steps, poke) {
   stepWorld(outer, steps, poke, dt, camOut, inner);
   stepWorld(inner, Math.ceil(steps * 0.6), null, dt, camIn, outer);
   viewWorld(outer, camOut);
-  if (frame % 4 === 0) shine(outer, 0.35);
+  if (cfg.bent) {
+    // one photon trace at a time, 16 steps a frame: outer, outer, inner, ...
+    if (!job) { photonStart(jobTurn % 3 === 2 ? inner : outer, 0.3); jobTurn++; }
+    photonTick(16);
+  } else {
+    if (frame % 4 === 0) lightWorld(outer);
+    if (frame % 8 === 2) lightWorld(inner);
+  }
   if (frame % 2 === 0) viewWorld(inner, camIn);
-  if (frame % 8 === 2) shine(inner, 0.35);
   if (frame % 20 === 1) measureAmp(outer);
   if (frame % 20 === 11) measureAmp(inner);
 }
@@ -1057,12 +1079,12 @@ function render(now) {
     uRes: [canvas.width, canvas.height], uCam: cam.p, uRot: { mat3: [...R, ...U, ...F] }, uFov: 1.0, uTime: now / 1000,
     uIso: isoOf(outer), uPol: Math.sign(outer.law.isoFrac), uKappa: outer.law.kappa, uHue: outer.law.hue, uAmp: outer.amp,
     uIsoIn: isoOf(inner), uPolIn: Math.sign(inner.law.isoFrac), uHueIn: inner.law.hue, uAmpIn: inner.amp,
-    uMoonW: mc, uMoonR: CM.MOON.R, uSteps: { int: 150 }, uStepsIn: { int: 110 },
+    uMoonW: mc, uMoonR: CM.MOON.R, uSteps: { int: 120 }, uStepsIn: { int: 96 },
     uCamSky: camCfg.on ? camCfg.sky : 0, uVidAspect: camAspect, uGlass: cfg.glass, uShaft: cfg.shaft,
   }, { uV1: outer.V1, uV2: outer.V2, uW1: inner.V1, uW2: inner.V2, uVid: VIDTEX });
 }
 function tick(now) {
-  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const rawDt = Math.max(1e-4, (now - last) / 1000), dt = Math.min(0.05, rawDt); last = now;
   frame++;
   const boost = keys.has('ShiftLeft') || keys.has('ShiftRight') ? 4 : 1;
   const acc = [0, 0, 0];
@@ -1093,7 +1115,7 @@ function tick(now) {
   simulate(dt, +$('spd').value, poke);
   render(now);
 
-  fpsN++; fpsT += dt;
+  fpsN++; fpsT += rawDt;            // the real frame time (dt is clamped for the physics)
   if (fpsT > 0.5) {
     const f = fpsN / fpsT; fpsAvg = 0.6 * fpsAvg + 0.4 * f;
     // hold the frame rate: shrink the picture when slow, grow it back (up to the slider) when there is room
@@ -1129,7 +1151,8 @@ if (SELFTEST || SHOT) {
   window.__grow = (n, st = 12) => { const t0 = performance.now(); for (let i = 0; i < n; i++) { frame++; simulate(0.016, st, null); } measureAmp(outer); measureAmp(inner); viewWorld(outer); viewWorld(inner); for (let k = 0; k < 3; k++) { shine(outer, 1); shine(inner, 1); viewWorld(outer); viewWorld(inner); } gl.finish(); return performance.now() - t0; };
   window.__look = (p, target) => { cam.p = p; cam.v = [0, 0, 0]; cam.q = [0, 0, 0, 1]; if (target) { const f = norm3(sub3(target, p)); const z = [0, 0, 1]; const ax = cross3(z, f), s = Math.hypot(...ax), c = dot3(z, f); cam.q = s < 1e-6 ? (c > 0 ? [0, 0, 0, 1] : [0, 1, 0, 0]) : qaxis(ax.map((v) => v / s), Math.atan2(s, c)); } else faceMoon(); return true; };
   window.__lightStats = () => {
-    const b = new Float32Array(GAT * GAT * 4); gl.bindFramebuffer(gl.FRAMEBUFFER, outer.fLT); gl.readPixels(0, 0, GAT, GAT, gl.RGBA, gl.FLOAT, b);
+    const b = new Float32Array(N * N * N * 4), sl = new Float32Array(N * N * 4);
+    for (let z = 0; z < N; z++) { gl.bindFramebuffer(gl.FRAMEBUFFER, outer.fLT[z]); gl.readPixels(0, 0, N, N, gl.RGBA, gl.FLOAT, sl); b.set(sl, z * N * N * 4); }
     let mx = 0, s = 0, n = 0, nan = 0; for (let i = 0; i < b.length; i += 4) { const v = b[i]; if (!Number.isFinite(v)) nan++; else { mx = Math.max(mx, v); s += v; n++; } }
     return { max: mx, mean: s / n, nan, bent: cfg.bent };
   };
@@ -1154,14 +1177,10 @@ if (SELFTEST) {
       gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, AT, AT, gl.RGBA, gl.FLOAT, up);
     }
     function uploadLight(t, light) {
-      const up = new Float32Array(GAT * GAT * 4);
-      for (let ty = 0; ty < GAT; ty++) for (let tx = 0; tx < GAT; tx++) {
-        const tl = [Math.floor(tx / GT), Math.floor(ty / GT)], lx = tx - tl[0] * GT - 1, ly = ty - tl[1] * GT - 1;
-        const x = (lx + N) % N, y = (ly + N) % N, z = tl[0] + tl[1] * 8;
-        up[4 * (ty * GAT + tx)] = light[(z * N + y) * N + x];
-      }
-      gl.bindTexture(gl.TEXTURE_2D, t);
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, GAT, GAT, gl.RGBA, gl.FLOAT, up);
+      const up = new Float32Array(N * N * N * 4);
+      for (let i = 0; i < N * N * N; i++) up[4 * i] = light[i];
+      gl.bindTexture(gl.TEXTURE_3D, t);
+      gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, N, N, N, gl.RGBA, gl.FLOAT, up);
     }
     function parity(camMode, seed, glue, opt = {}) {
       const w = outer, o = inner;
@@ -1201,7 +1220,7 @@ if (SELFTEST) {
     const r = { field: parity(0, 42, 0), membrane: parity(0, 45, 1), cameraSlab: parity(1, 43, 1), cameraShell: parity(2, 44, 1), steps: 25 };
     cfg.glue = 1;
     seedWorld(outer, null); seedWorld(inner, null);
-    gl.bindTexture(gl.TEXTURE_2D, outer.LT); gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, GAT, GAT, gl.RGBA, gl.FLOAT, new Float32Array(GAT * GAT * 4));
+    gl.bindTexture(gl.TEXTURE_3D, outer.LT); gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, N, N, N, gl.RGBA, gl.FLOAT, new Float32Array(N * N * N * 4));
     r.ok = r.field.ok && r.membrane.ok && r.cameraSlab.ok && r.cameraShell.ok;
     r.glError = gl.getError();
     return r;

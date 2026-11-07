@@ -54,7 +54,7 @@
   const MAX_ISLANDS = 8;
   const LIGHT = { steps: 24, sigma: 0.7, falloff: 18, L0: 0.25 };
   // bent moonlight: photons from the moon, bent by the same lens as the view, absorbed weakly by crystal (glass)
-  const PHOTON = { K: 65536, h: 0.8, steps: 48, sigma: 0.12, maxR: 46, cap: 3 };
+  const PHOTON = { K: 16384, h: 0.8, steps: 48, sigma: 0.12, maxR: 46, cap: 3 };
 
   function mix(x) {
     x |= 0;

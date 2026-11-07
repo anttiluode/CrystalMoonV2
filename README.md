@@ -5,7 +5,7 @@ The geometry starts acting on itself.
 [CrystalMoon](https://github.com/anttiluode/CrystalMoon) was one Mexican-hat crystal per world, a lens that bends light toward dense crystal, a clock that slows it, and a moon that is a sphere inversion with another world inside. V2 keeps all of that and adds four ways for the world to work on itself:
 
 1. **Two scales.** A coarse crystal grows the bodies. A fine lattice can only live inside them, so every body is made of smaller crystal, and the fine crystal feeds back on where the body may grow.
-2. **The moon is the light, and the light writes.** 65 536 photons leave the moon every few frames and travel through the same lens the view rays use, so crystal bends them toward itself. Inside the islands, lit crystal grows and dark crystal melts. Crystal redirects the light, the redirected light writes crystal, and that crystal redirects the light again: the loop of a self-written waveguide. The same light shades the crystal and hangs in the air as shafts.
+2. **The moon is the light, and the light writes.** 16 384 photons leave the moon in a steady stream of traces and travel through the same lens the view rays use, so crystal bends them toward itself. Inside the islands, lit crystal grows and dark crystal melts. Crystal redirects the light, the redirected light writes crystal, and that crystal redirects the light again: the loop of a self-written waveguide. The same light shades the crystal and hangs in the air as shafts.
 3. **The moon is a membrane.** The world outside and the world inside are glued across it, so crystal that touches the moon grows through. Inside, the inversion bends what came through into arcs that shrink toward the core.
 4. **Glass shows what is really behind it.** A refracted ray crosses each crystal, leaves it, and finds the next crystal (or the moon, or your face in the sky) behind it.
 
@@ -49,14 +49,14 @@ what you see:  Ψ = ψ + βφ
 - **The surface you see is the sum.** Far away a body looks smooth. Close up its surface is the fine lattice poking through.
 - **q² is set for the lattice, not the continuum.** The 7-point Laplacian has symbol 2 − 2cos k along an axis, not k². At λ ≈ 9 the difference is negligible; at λ ≈ 4.5 it moves the wavelength by 10%. V2 sets q² = 2 − 2cos(2π/λ) so the spectrum peaks where the law says (T4).
 
-**Moonlight: photons through the lens.** Every 4 frames (8 for the inner world):
+**Moonlight: photons through the lens.** One trace at a time, spread over 3 frames (16 steps a frame), alternating outer, outer, inner:
 
 ```
-emit     K = 65 536 photons from the moon's surface, directions on a Fibonacci sphere under a random rotation
+emit     K = 16 384 photons from the moon's surface, directions on a Fibonacci sphere under a random rotation
 step     d ← normalise(d + h (∇n − (∇n·d) d) / n),   n = 1 + κρ      (the view rays' own ray equation)
          x ← x + h d,      w ← w · exp(−0.12 · occ(x) · h),   occ = smoothstep(0.6·iso, 1.2·iso, Ψ)
 deposit  w·h into the voxel at x                                      (additive blending, 48 steps, h = 0.8)
-light    fluence · 4π(R+2)²/K, blurred once, capped at 3, averaged with the old light (weight 0.35)
+light    fluence · 4π(R+2)²/K, blurred once, capped at 3, averaged with the old light (weight 0.3)
 ```
 
 With no crystal this is the free 1/r² falloff, normalised to 1 at two voxels above the moon. Crystal is glass here: it absorbs weakly (σ = 0.12, so it still casts shadows) and bends strongly, so a body that faces the moon can gather light and carry it outward. Light enters growth only inside the islands, so the open sea is never lit into crystal; it sculpts the islands.
@@ -105,7 +105,7 @@ Found while checking: with the nucleation noise switched on only where ε > 0, t
 
 ## What this is not (yet)
 
-- **Speed.** The first version ran at 20 fps on Antti's RTX 3060. Since then: the islands' ε is written once per level into a texture instead of recomputed every step, the glass ray is shorter (≤ 10 steps inside, ≤ 34 outside) and is skipped where its blend weight would be under 3% or the hit is far, and *hold the frame rate* lowers the render scale when fps drops under 40 and raises it again above 55. *Glass* at exactly 0 skips the glass ray entirely (any other value still runs it). The new fps on the 3060 is not measured yet.
+- **Speed.** The first version ran at 20 fps on Antti's RTX 3060 — and the counter could not show less than 20, because it divided by the physics time step, which is clamped at 0.05 s. It now uses the real frame time. Since then: the view fields are 64³ 3D textures with hardware trilinear filtering and REPEAT wrap (one texture fetch per sample instead of two, and no gutter), the march takes longer strides with distance and stops at 125 (fog hides both), the islands' ε is written once per level, the photon budget is 16 384 spread over three frames, the glass ray is shorter and skipped where it would barely show, and *hold the frame rate* lowers the render scale under 40 fps. In headless SwiftShader one 320×180 frame went from 4.9 s to 2.2 s. The fps on the 3060 is not measured yet.
 - **The photons are not waves.** They bend and concentrate, so light can be channelled by crystal, but there is no diffraction or interference. This is ray optics; it cannot show a spatial soliton. The photon tracer is checked on the CPU (T12); the GPU version mirrors it but reads ρ from half-float textures and is not compared number for number.
 - **No light crosses the membrane.** Each world is lit by its own moon.
 - **The moon lights only its own cell.** The world repeats every 64 units; photons stop 46 units from the moon, and the renderer fades the light out beyond ~40 units so the periodic copies are not lit by a moon that is not there.
