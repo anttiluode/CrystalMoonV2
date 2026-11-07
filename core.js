@@ -69,7 +69,7 @@
   function law(level) {
     const u = (k) => rnd(level, k);
     const L = level === 0
-      ? { lamC: 9.0, gC: 1.0, lamF: 4.6, gF: 1.0, epsIsland: 0.26, epsF: 0.32, skin0: -0.2, skin1: 0.3, beta: 0.9, kfb: 0.12, kL: 0.3,
+      ? { lamC: 9.0, gC: 1.0, lamF: 4.6, gF: 1.0, epsIsland: 0.26, epsF: 0.32, skin0: -0.2, skin1: 0.3, beta: 0.9, kfb: -0.1, kL: 0.3,
         glue: 1.0, isoFrac: 0.42, kappa: 0.8, T: 1.5, hue: 0.58 }
       : {
         lamC: 8.0 + 4.0 * u(1),
@@ -80,7 +80,7 @@
         epsF: 0.24 + 0.14 * u(11),
         skin0: -0.2, skin1: 0.3,
         beta: 0.6 + 0.4 * u(12),
-        kfb: -0.2 + 0.4 * u(13),
+        kfb: -0.2 + 0.26 * u(13),
         kL: 0.1 + 0.35 * u(14),
         glue: 1.0,
         isoFrac: [0.42, 0.3, -0.15, 0.55][Math.floor(u(4) * 4)],
