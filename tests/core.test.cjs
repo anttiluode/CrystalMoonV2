@@ -205,6 +205,19 @@ function spectrumPeak(f, arr, mmax) {
     `inner |ψ| > 0.1 at the mirror site: glued ${(100 * g.innerCrystal).toFixed(0)}%, unglued ${(100 * z.innerCrystal).toFixed(0)}%; inner far side |ψ|>0.05 ${(100 * g.farInner).toFixed(0)}%; mean |Ψ_in − Ψ_out(2c−x)| at the membrane ${g.mismatch.toFixed(3)}`);
 }
 
+// ---------------------------------------------- T12 bent moonlight: crystal guides light
+{
+  const N = CM.N, c = CM.MOON.c, Psi = new Float32Array(N * N * N);
+  // a crystal rod, radius 2.5, standing out from the moon along +z
+  for (let z = 0; z < N; z++) for (let y = 0; y < N; y++) for (let x = 0; x < N; x++)
+    if (Math.hypot(x - c[0], y - c[1]) < 2.5 && z > c[2] + 10 && z < c[2] + 31) Psi[(z * N + y) * N + x] = 1.5;
+  const at = (I, dx, dz) => I[((c[2] + dz) * N + c[1]) * N + c[0] + dx];
+  const flat = CM.tracePhotons(Psi, 0.6, 1, 0, { K: 65536 }), bent = CM.tracePhotons(Psi, 0.6, 1, 0.8, { K: 65536 });
+  ok('T12 photons through the lens: a crystal rod that casts a shadow with straight light becomes a light guide when light bends (κ = 0.8), and the space beside it goes darker',
+    at(bent, 0, 24) > 10 * at(flat, 0, 24) && at(bent, 5, 24) < at(flat, 5, 24),
+    `light inside the rod 24 voxels out: straight ${at(flat, 0, 24).toFixed(3)}, bent ${at(bent, 0, 24).toFixed(3)} (cap ${CM.PHOTON.cap}); 5 voxels beside it: straight ${at(flat, 5, 24).toFixed(3)}, bent ${at(bent, 5, 24).toFixed(3)}`);
+}
+
 // ------------------------------------------------------------- the camera (V1 behaviour kept)
 const camImg = (fb, fd) => {
   const W = CM.CAM.W, H = CM.CAM.H, a = new Float32Array(2 * W * H);

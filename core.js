@@ -53,6 +53,8 @@
   const MOON = { c: [32, 32, 32], R: 9 };
   const MAX_ISLANDS = 8;
   const LIGHT = { steps: 24, sigma: 0.7, falloff: 18, L0: 0.25 };
+  // bent moonlight: photons from the moon, bent by the same lens as the view, absorbed weakly by crystal (glass)
+  const PHOTON = { K: 65536, h: 0.8, steps: 48, sigma: 0.12, maxR: 46, cap: 3 };
 
   function mix(x) {
     x |= 0;
@@ -258,8 +260,9 @@
         if (g > 0) { a += dt * g * (o.psi[j] - p); c += dt * g * (o.phi[j] - f); }
         // a whisper of noise where crystal may grow, so it always nucleates (same integer hash on the GPU)
         if (this.noise > 0) {
-          if (ec > 0) a += this.noise * (noiseU(i, frame, 1) - 0.5);
-          if (ef > 0) c += this.noise * (noiseU(i, frame, 2) - 0.5);
+          // gated smoothly (not ε > 0), so the CPU/GPU comparison never hinges on the sign of a rounding error
+          a += this.noise * (noiseU(i, frame, 1) - 0.5) * smoothstep(0, 0.02, ec);
+          c += this.noise * (noiseU(i, frame, 2) - 0.5) * smoothstep(0, 0.02, ef);
         }
         np[i] = a; nf[i] = c;
       }
@@ -309,6 +312,69 @@
     return field.light;
   }
 
+
+  // ------------------------------------------------------- bent moonlight (photons)
+  const BLUR9 = [0.1995, 0.1760, 0.1210, 0.0648, 0.0270];
+  /** ρ = Ψ² blurred along x, y, z with the renderer's 9-tap kernel, and ∇ρ by central differences (the view pass). */
+  function densityAndGradient(Psi) {
+    const V = N * N * N, idx = (x, y, z) => (((z % N) + N) % N) * N * N + (((y % N) + N) % N) * N + (((x % N) + N) % N);
+    let a = new Float32Array(V), b = new Float32Array(V);
+    for (let i = 0; i < V; i++) a[i] = Psi[i] * Psi[i];
+    for (const dir of [[1, 0, 0], [0, 1, 0], [0, 0, 1]]) {
+      for (let z = 0; z < N; z++) for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+        let s = 0;
+        for (let k = -4; k <= 4; k++) s += BLUR9[Math.abs(k)] * a[idx(x + k * dir[0], y + k * dir[1], z + k * dir[2])];
+        b[idx(x, y, z)] = s;
+      }
+      [a, b] = [b, a];
+    }
+    const rho = a, gx = new Float32Array(V), gy = new Float32Array(V), gz = new Float32Array(V);
+    for (let z = 0; z < N; z++) for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      const i = idx(x, y, z);
+      gx[i] = 0.5 * (rho[idx(x + 1, y, z)] - rho[idx(x - 1, y, z)]);
+      gy[i] = 0.5 * (rho[idx(x, y + 1, z)] - rho[idx(x, y - 1, z)]);
+      gz[i] = 0.5 * (rho[idx(x, y, z + 1)] - rho[idx(x, y, z - 1)]);
+    }
+    return { rho, gx, gy, gz };
+  }
+  /** Photons leave the moon on a Fibonacci sphere (rotated by rot), follow d(n d)/ds = ∇n with n = 1 + κρ
+   *  (the same ray equation as the view rays), lose weight exp(−σ·occ·h) in crystal, and deposit w·h in the
+   *  voxel they reach. Returns the fluence, normalised to the free 1/r² falloff (1 at r = R + 2), blurred once.
+   *  This is the CPU spec of the GPU photon passes; the GPU reads ρ and ∇ρ from half-float textures. */
+  function tracePhotons(Psi, iso, pol, kappa, opt = {}) {
+    const K = opt.K || 8192, h = opt.h || PHOTON.h, S = opt.steps || PHOTON.steps, sig = opt.sigma != null ? opt.sigma : PHOTON.sigma;
+    const rot = opt.rot || [1, 0, 0, 0, 1, 0, 0, 0, 1];
+    const { rho, gx, gy, gz } = densityAndGradient(Psi);
+    const c = MOON.c, R = MOON.R, acc = new Float32Array(N * N * N);
+    for (let k = 0; k < K; k++) {
+      const zz = 1 - 2 * (k + 0.5) / K, ph = 2 * Math.PI * ((k * 0.3819660112501051) % 1), s = Math.sqrt(Math.max(0, 1 - zz * zz));
+      const v = [s * Math.cos(ph), s * Math.sin(ph), zz];
+      let d = [rot[0] * v[0] + rot[3] * v[1] + rot[6] * v[2], rot[1] * v[0] + rot[4] * v[1] + rot[7] * v[2], rot[2] * v[0] + rot[5] * v[1] + rot[8] * v[2]];
+      let x = [c[0] + d[0] * (R + 0.6), c[1] + d[1] * (R + 0.6), c[2] + d[2] * (R + 0.6)], w = 1;
+      for (let st = 0; st < S && w > 0; st++) {
+        const r0 = trilinear(rho, ...x), g = [kappa * trilinear(gx, ...x), kappa * trilinear(gy, ...x), kappa * trilinear(gz, ...x)];
+        const gd = g[0] * d[0] + g[1] * d[1] + g[2] * d[2];
+        for (let i = 0; i < 3; i++) d[i] += h * (g[i] - gd * d[i]) / (1 + kappa * r0);
+        const dn = Math.hypot(...d); d = d.map((t) => t / dn);
+        for (let i = 0; i < 3; i++) x[i] += d[i] * h;
+        const r = Math.hypot(x[0] - c[0], x[1] - c[1], x[2] - c[2]);
+        if (r < R || r > PHOTON.maxR) { w = 0; break; }
+        w *= Math.exp(-sig * smoothstep(0.6 * iso, 1.2 * iso, pol * trilinear(Psi, ...x)) * h);
+        if (w < 0.01) { w = 0; break; }
+        const vx = ((Math.round(x[0]) % N) + N) % N, vy = ((Math.round(x[1]) % N) + N) % N, vz = ((Math.round(x[2]) % N) + N) % N;
+        acc[(vz * N + vy) * N + vx] += w * h;
+      }
+    }
+    const out = new Float32Array(N * N * N), norm = 4 * Math.PI * (R + 2) * (R + 2) / K;
+    const I = (x, y, z) => acc[(((z % N) + N) % N) * N * N + (((y % N) + N) % N) * N + (((x % N) + N) % N)];
+    for (let z = 0; z < N; z++) for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      const f = 0.5 * I(x, y, z) + (I(x + 1, y, z) + I(x - 1, y, z) + I(x, y + 1, z) + I(x, y - 1, z) + I(x, y, z + 1) + I(x, y, z - 1)) / 12;
+      const d = Math.hypot(x - c[0], y - c[1], z - c[2]);
+      out[(z * N + y) * N + x] = d < R - 0.5 ? 0 : Math.min(PHOTON.cap, f * norm);
+    }
+    return out;
+  }
+
   // ------------------------------------------------------------ the moon portal
   function portal(x, c = MOON.c, R = MOON.R) {
     const r = [x[0] - c[0], x[1] - c[1], x[2] - c[2]];
@@ -330,6 +396,6 @@
     return J;
   }
 
-  return { N, MOON, MAX_ISLANDS, CAM, LIGHT, law, derive, islandMask, band, mirrorVoxel, Field, computeLight, lightAt, occupancy,
+  return { N, MOON, MAX_ISLANDS, CAM, LIGHT, PHOTON, tracePhotons, densityAndGradient, law, derive, islandMask, band, mirrorVoxel, Field, computeLight, lightAt, occupancy,
     trilinear, noiseU, portal, invert, portalJacobian, camTex, camPlace, mix, rnd, smoothstep, wrap1 };
 });

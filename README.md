@@ -5,7 +5,7 @@ The geometry starts acting on itself.
 [CrystalMoon](https://github.com/anttiluode/CrystalMoon) was one Mexican-hat crystal per world, a lens that bends light toward dense crystal, a clock that slows it, and a moon that is a sphere inversion with another world inside. V2 keeps all of that and adds four ways for the world to work on itself:
 
 1. **Two scales.** A coarse crystal grows the bodies. A fine lattice can only live inside them, so every body is made of smaller crystal, and the fine crystal feeds back on where the body may grow.
-2. **The moon is the light, and the light writes.** Crystal casts shadows away from the moon. Inside the islands, lit crystal grows and shadowed crystal melts, so the crystals compete for the moon. The same light shades the crystal and hangs in the air as shafts.
+2. **The moon is the light, and the light writes.** 65 536 photons leave the moon every few frames and travel through the same lens the view rays use, so crystal bends them toward itself. Inside the islands, lit crystal grows and dark crystal melts. Crystal redirects the light, the redirected light writes crystal, and that crystal redirects the light again: the loop of a self-written waveguide. The same light shades the crystal and hangs in the air as shafts.
 3. **The moon is a membrane.** The world outside and the world inside are glued across it, so crystal that touches the moon grows through. Inside, the inversion bends what came through into arcs that shrink toward the core.
 4. **Glass shows what is really behind it.** A refracted ray crosses each crystal, leaves it, and finds the next crystal (or the moon, or your face in the sky) behind it.
 
@@ -49,11 +49,19 @@ what you see:  Ψ = ψ + βφ
 - **The surface you see is the sum.** Far away a body looks smooth. Close up its surface is the fine lattice poking through.
 - **q² is set for the lattice, not the continuum.** The 7-point Laplacian has symbol 2 − 2cos k along an axis, not k². At λ ≈ 9 the difference is negligible; at λ ≈ 4.5 it moves the wavelength by 10%. V2 sets q² = 2 − 2cos(2π/λ) so the spectrum peaks where the law says (T4).
 
-**Moonlight.**
+**Moonlight: photons through the lens.** Every 4 frames (8 for the inner world):
+
 ```
-light(x) = exp(−0.7 ∫ occ ds) / (1 + ((|x − c| − R)/18)²),     occ = smoothstep(0.6·iso, 1.2·iso, Ψ)
+emit     K = 65 536 photons from the moon's surface, directions on a Fibonacci sphere under a random rotation
+step     d ← normalise(d + h (∇n − (∇n·d) d) / n),   n = 1 + κρ      (the view rays' own ray equation)
+         x ← x + h d,      w ← w · exp(−0.12 · occ(x) · h),   occ = smoothstep(0.6·iso, 1.2·iso, Ψ)
+deposit  w·h into the voxel at x                                      (additive blending, 48 steps, h = 0.8)
+light    fluence · 4π(R+2)²/K, blurred once, capped at 3, averaged with the old light (weight 0.35)
 ```
-The integral runs along the straight line from x to the moon (24 samples), through the crystal you can see. It is recomputed on the GPU every 3 frames (every 6 for the inner world). Light enters growth only inside the islands, so the open sea is never lit into crystal; it sculpts the islands instead.
+
+With no crystal this is the free 1/r² falloff, normalised to 1 at two voxels above the moon. Crystal is glass here: it absorbs weakly (σ = 0.12, so it still casts shadows) and bends strongly, so a body that faces the moon can gather light and carry it outward. Light enters growth only inside the islands, so the open sea is never lit into crystal; it sculpts the islands.
+
+The V1-style straight light is still there (uncheck *moonlight bends through the crystal*): the transmittance exp(−0.7 ∫ occ ds) along the straight line to the moon, times 1/(1 + ((|x − c| − R)/18)²). Switching between the two is the A/B for what the bending does.
 
 The inner world is lit by its own moon at its centre. Through the portal its centre is infinity, which is out past the membrane on our side, so from inside the moon the inner crystals are lit from the direction of the world you came from.
 
@@ -67,15 +75,24 @@ LEDGER_TABLE
 
 **The GPU matches the CPU.** Open `index.html?selftest` and the page steps both fields on the GPU and in `core.js` from the same start, for 25 steps, with the light term, the membrane, the nucleation noise and the camera all on. The noise is an integer hash written identically in JS and GLSL, so it is part of the comparison, not switched off for it.
 
-SELFTEST_TABLE
+| run (25 steps, light = k/16 pattern) | largest \|GPU − CPU\| | largest \|field\| |
+|---|---|---|
+| both fields, no membrane | 4.8e-8 | 0.12 |
+| membrane on (other world uploaded too) | 5.0e-8 | 0.12 |
+| camera picture on the sheet | 6.7e-8 | 0.12 |
+| camera picture on the moon's shell | 3.4e-8 | 0.12 |
+
+Found while checking: with the nucleation noise switched on only where ε > 0, the comparison failed at 1e-3 in rare voxels where ε was zero to within rounding and the two sides disagreed about its sign. The noise is now gated by smoothstep(0, 0.02, ε), which is continuous, and the difference is back at rounding level.
 
 (headless Chrome, SwiftShader.)
 
 ## What this is not (yet)
 
-- **Speed on a real GPU is not measured.** It runs in headless SwiftShader. The new costs are a light pass every 3 frames, one more texture read per sim step, and the glass ray, which can add up to ~75 samples on pixels that hit crystal. If it is slow, lower *glass* to 0 first (that falls back to V1's glass), then render scale.
-- **The light travels straight.** The view rays bend through the lens; the light from the moon does not. It also casts no light through the membrane: each world is lit by its own moon.
-- **The moon lights only its own cell.** The world repeats every 64 units; the light is faded out beyond ~40 units from the one real moon so the copies are not lit by a moon that is not there.
+- **Speed.** The first version ran at 20 fps on Antti's RTX 3060. Since then: the islands' ε is written once per level into a texture instead of recomputed every step, the glass ray is shorter (≤ 10 steps inside, ≤ 34 outside) and is skipped where its blend weight would be under 3% or the hit is far, and *hold the frame rate* lowers the render scale when fps drops under 40 and raises it again above 55. *Glass* at exactly 0 skips the glass ray entirely (any other value still runs it). The new fps on the 3060 is not measured yet.
+- **The photons are not waves.** They bend and concentrate, so light can be channelled by crystal, but there is no diffraction or interference. This is ray optics; it cannot show a spatial soliton. The photon tracer is checked on the CPU (T12); the GPU version mirrors it but reads ρ from half-float textures and is not compared number for number.
+- **No light crosses the membrane.** Each world is lit by its own moon.
+- **The moon lights only its own cell.** The world repeats every 64 units; photons stop 46 units from the moon, and the renderer fades the light out beyond ~40 units so the periodic copies are not lit by a moon that is not there.
+- **The bodies can still fuse.** With the lattice feeding the body (k_fb > 0) and strong light, ε inside lit bodies roughly doubles and the bodies swell into smooth blobs. Level 0 now has k_fb = −0.1 (the lattice eats the body, which leaves it porous); deeper levels draw k_fb from −0.2 to +0.06.
 - **The two clocks are separate.** One shared clock 1/(1 + T(ψ² + φ²)) was the first version; inside dense bodies it slowed the fine lattice about 3.5×, and it took ~3× longer to appear. Each field now runs on its own density.
 - **The lattice appears after the bodies.** Bodies condense in ~1500 steps (about 2 s at default speed), the lattice inside them in ~3500.
 - **Two scales on a 64³ grid are not far apart.** λc/λf is about 2. A body is a few lattice cells thick. More separation needs a finer grid.
@@ -84,8 +101,8 @@ SELFTEST_TABLE
 
 ## Files
 
-- `index.html`: the world (both fields on the GPU, moonlight pass, membrane, density lens, curved-ray raymarcher with the glass ray, moon portal, flight, camera)
-- `core.js`: the laws, the CPU reference for both fields, the light, the portal and membrane maths, the camera placement. It is the spec the shaders mirror
+- `index.html`: the world (both fields on the GPU, photon and straight moonlight, membrane, density lens, curved-ray raymarcher with the glass ray, moon portal, flight, camera)
+- `core.js`: the laws, the CPU reference for both fields, both kinds of light, the portal and membrane maths, the camera placement. It is the spec the shaders mirror
 - `tests/core.test.cjs`: the ledger
 
 Built with Claude (Opus 5.5), Saturday 7 November 2026, from CrystalMoon and a talk with Astra about what it was begging for: two growth scales, the moon folding the growth and not only the view, light that leaves a structural memory, and glass you can see through.
